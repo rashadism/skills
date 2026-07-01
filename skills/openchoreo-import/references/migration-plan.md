@@ -24,14 +24,14 @@ The `report` frame ships **← Back to plan** and **Copy plan.md** buttons in th
 Decisions only the migrator owns — the source can't tell you these. Each carries the agent's **recommendation** (derived from source signals); the migrator rubber-stamps or flips. Settle these before working through 2 onward, because each shapes what gets authored downstream.
 
 #### 1. Secret store backend
-ESO → `ClusterSecretStore` → backend. Default in shipped installs is **OpenBao** (in-cluster Vault fork; what k3d + quickstart use). Substitute if the install already uses Vault / AWS Secrets Manager / GCP Secret Manager / Azure Key Vault / other.
+ESO → `ClusterSecretStore` → backend. The backend is whatever the target install's `ClusterSecretStore` points at (Vault / OpenBao / AWS Secrets Manager / GCP Secret Manager / Azure Key Vault / other) — a property of the install, not something the plan picks.
 
-*Recommendation* — derive from source: if the manifests reference a specific backend via `ExternalSecret` / `SecretProviderClass`, recommend that store; otherwise OpenBao.
-*Confirm* — is a `ClusterSecretStore` already installed? If yes, name it; the per-Project SecretReferences below assume it.
+*Recommendation* — derive from the source first: if the manifests reference a specific backend via `ExternalSecret` / `SecretProviderClass`, name that store. Otherwise leave it to the install's existing `ClusterSecretStore`.
+*Confirm* — which `ClusterSecretStore` does the target install have? Name it; the per-Project SecretReferences below assume it.
 
 #### 2. Secret seeding mechanism
 How secret material reaches the backend. Options:
-- `occ secret create` — when `features.secretManagement.enabled` is on (default for k3d + quickstart) and `occ` ≥ v1.1. Control plane writes through to the target plane's store.
+- `occ secret create` — when the install has `features.secretManagement.enabled` on and `occ` ≥ v1.1. Control plane writes through to the target plane's store.
 - Backstage Secrets UI — same path, browser-driven.
 - Direct provider CLI — `bao kv put`, `vault kv put`, `aws secretsmanager put-secret-value`, etc.
 - Pre-seeded by another process — the plan only authors `SecretReference`s.
@@ -50,7 +50,7 @@ How each `ResourceType`'s `resources[]` provisions the infra:
 
 #### 4. Build strategy (only if any Component builds from source)
 Per Component:
-- **Workflow template** — pick from the install's `allowedWorkflows[]` for the chosen CT. Default catalog ships `dockerfile-builder`, `paketo-buildpacks-builder`, `gcp-buildpacks-builder`, `ballerina-buildpack-builder`; PEs can author custom `ClusterWorkflow`s. Or **BYOI** (skip the build, supply a pre-built `spec.container.image`).
+- **Workflow template** — pick from the install's `allowedWorkflows[]` for the chosen CT (the migrator confirms which build templates their install offers; PEs can author custom `ClusterWorkflow`s). Or **BYOI** (skip the build, supply a pre-built `spec.container.image`).
 - **Git provider** — GitHub / GitLab / Bitbucket / Gitea / other. Drives the credential shape.
 - **Git credentials** — `SecretReference` in the project namespace targeted at the `ClusterWorkflowPlane`, category `git-credentials` (`occ secret create generic <name> --target-plane ClusterWorkflowPlane/<wp> --category git-credentials --from-literal=username=… --from-literal=password=…`).
 
@@ -58,21 +58,21 @@ Per Component:
 
 ### 2. Cluster prerequisites
 
-What must exist at the cluster level before any project migrates. A standard OpenChoreo install provides most of it — **flag only what's missing or needs adapting** for this app; mark the rest "assumed present (standard install)".
+What must exist at the cluster level before any project migrates. This skill never sees the target cluster — so **state each item as a prerequisite to verify, never as "already present."** The migrator checks each against their install and creates what's missing.
 
 **Always required:**
 
-- **Control-plane Namespace** labelled `openchoreo.dev/control-plane: true` (the `default` namespace is auto-labelled at install).
-- **DataPlane** (or `ClusterDataPlane`) — the target Kubernetes cluster, referenced by Environments. A standard install provides a cluster-scoped `ClusterDataPlane: default` visible to all namespaces; flag a dedicated `DataPlane` only if this app needs isolation.
-- **Environment(s)** — `spec.dataPlaneRef {kind, name}`, `spec.isProduction`. A standard install provides `development` + `staging` + `production`; flag any extra (or renamed) env the app needs.
-- **DeploymentPipeline** — `spec.promotionPaths[]` of `{sourceEnvironmentRef, targetEnvironmentRefs[]}`. A standard install provides `default` (development → staging → production); flag a custom pipeline only if the app's promotion differs. Every Project pins to exactly one pipeline.
+- **Control-plane Namespace** labelled `openchoreo.dev/control-plane: true`.
+- **DataPlane** (or `ClusterDataPlane`) — the target Kubernetes cluster, referenced by Environments. Confirm one exists (cluster-scoped or namespaced); a dedicated `DataPlane` if this app needs isolation.
+- **Environment(s)** — `spec.dataPlaneRef {kind, name}`, `spec.isProduction`. Confirm the environments this app promotes through exist (name them).
+- **DeploymentPipeline** — `spec.promotionPaths[]` of `{sourceEnvironmentRef, targetEnvironmentRefs[]}`. Confirm a pipeline covering this app's promotion exists. Every Project pins to exactly one pipeline.
 
 **Conditional (only if this app needs them):**
 
-- **External Secrets Operator (ESO) + `ClusterSecretStore`** — required as soon as any Workload consumes a secret (almost always). OpenChoreo's secret path runs through ESO: secret material lives in an external store (OpenBao by default, or whatever 1.1 picked), and a `ClusterSecretStore` connects ESO to it. The DataPlane references the store via `spec.secretStoreRef: {name: <store>}`. If the install lacks ESO + a `ClusterSecretStore`, this is a hard prerequisite — install ESO (`helm upgrade --install external-secrets …`), create a `ClusterSecretStore`, wire `spec.secretStoreRef` on the DataPlane.
-- **WorkflowPlane + ClusterWorkflowTemplates** — required if any Component builds from source. Default install ships the four default builders (see 1.4); flag only custom workflow templates the app needs.
+- **External Secrets Operator (ESO) + `ClusterSecretStore`** — required as soon as any Workload consumes a secret (almost always). OpenChoreo's secret path runs through ESO: secret material lives in an external store, and a `ClusterSecretStore` connects ESO to it. The DataPlane references the store via `spec.secretStoreRef: {name: <store>}`. If the install lacks ESO + a `ClusterSecretStore`, this is a hard prerequisite — install ESO (`helm upgrade --install external-secrets …`), create a `ClusterSecretStore`, wire `spec.secretStoreRef` on the DataPlane.
+- **WorkflowPlane + ClusterWorkflowTemplates** — required if any Component builds from source. Confirm the build templates this app's Components reference exist (see 1.4).
 - **ObservabilityPlane + NotificationChannel** — required only if the app uses an observability-alerting Trait. Each alert Trait needs at least one notification channel — either the Environment's default or a per-Trait one. Flag the channels by name + type (Slack / email / webhook / …).
-- **Secret Management API gating** (`features.secretManagement.enabled` on the `openchoreo-control-plane` chart) — required to use the `occ secret create` / Backstage path from 1.2. Enabled by default in the k3d single-cluster install and quickstart; for any other deployment, `helm upgrade … --set features.secretManagement.enabled=true`. Without it, only the direct-provider-CLI / pre-seeded paths from 1.2 work.
+- **Secret Management API gating** (`features.secretManagement.enabled` on the `openchoreo-control-plane` chart) — required to use the `occ secret create` / Backstage path from 1.2. Check whether the target install has it on; if not, `helm upgrade … --set features.secretManagement.enabled=true`. Without it, only the direct-provider-CLI / pre-seeded paths from 1.2 work.
 
 ### 3. Shared types (cluster-scoped, authored once)
 
